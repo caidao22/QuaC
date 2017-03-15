@@ -60,6 +60,9 @@ int main(int argc,char **args){
   /* plasmon decay */
   add_lin(gamma_s,a);
 
+  MatAssemblyBegin(full_A,MAT_FINAL_ASSEMBLY);
+  MatAssemblyEnd(full_A,MAT_FINAL_ASSEMBLY);
+
   set_initial_pop(a,0);
   set_initial_pop(qd[0],0);
   set_initial_pop(qd[1],1);
@@ -95,9 +98,10 @@ int main(int argc,char **args){
     f_fid = fopen("fid","w");
     fprintf(f_fid,"#Time Fidelity Concurrence\n");
   }
-  
+
   /* time_step(time_max,dt,steps_max); */
-  steady_state();
+  time_step_adjoint(time_max,dt,steps_max,PETSC_FALSE);
+  /* steady_state(); */
 
   destroy_op(&a);
   for (i=0;i<num_qd;i++){

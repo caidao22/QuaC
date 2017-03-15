@@ -496,3 +496,139 @@ PetscErrorCode RHSFunction (TS ts, PetscReal t, Vec array_in, Vec array_out, voi
 /*   PetscFunctionReturn(0); */
 /* } */
 
+/*
+ * time_step_adjoint solves the adjoint for the time_dependence of the system
+ * that was previously setup using the add_to_ham and add_lin
+ * routines. Solver selection and parameters can be controlled via PETSc
+ * command line options. Default solver is TSRK3BS
+ *
+ * Inputs:
+ *       double dt:       initial timestep. For certain explicit methods, this timestep·
+ *                        can be changed, as those methods have adaptive time steps
+ *       double time_max: the maximum time to integrate to
+ *       int steps_max:   max number of steps to take
+ */
+PetscErrorCode time_step_adjoint(PetscReal time_max,PetscReal dt,PetscInt steps_max,PetscBool forwardonly){
+  PetscViewer    mat_view;
+  Vec            x;
+  TS             ts;
+  PetscInt       i,j,Istart,Iend,steps;
+  PetscScalar    mat_tmp;
+  PetscInt       dim = total_levels*total_levels;
+  PetscErrorCode ierr;
+
+  if (!stab_added){
+    /* Possibly print dense ham. No stabilization is needed? */
+    if (nid==0) {
+      /* Print dense ham, if it was asked for */
+      if (_print_dense_ham){
+        FILE *fp_ham;
+
+        fp_ham = fopen("ham","w");
+
+        if (nid==0){
+          for (i=0;i<total_levels;i++){
+            for (j=0;j<total_levels;j++){
+              fprintf(fp_ham,"%e ",_hamiltonian[i][j]);
+            }
+            fprintf(fp_ham,"\n");
+          }
+        }
+        fclose(fp_ham);
+        for (i=0;i<total_levels;i++){
+          free(_hamiltonian[i]);
+        }
+        free(_hamiltonian);
+      }
+    }
+  }
+
+  /*
+   * Create parallel vectors.
+   * - When using VecCreate(), VecSetSizes() and VecSetFromOptions(),
+   * we specify only the vector's global
+   * dimension; the parallel partitioning is determined at runtime.
+   * - Note: We form 1 vector from scratch and then duplicate as needed.
+   */
+  /* VecCreate(PETSC_COMM_WORLD,&x); */
+  /* VecSetSizes(x,PETSC_DECIDE,dim); */
+  create_dm(&x,total_levels);
+  /* VecSetFromOptions(x); */
+
+  /* VecSet(x,0.0); */
+
+  _set_initial_density_matrix(x);
+
+  /* Assemble x and b */
+  VecAssemblyBegin(x);
+  VecAssemblyEnd(x);
+
+  /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*
+   *       Create the timestepping solver and set various options       *
+   *- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
+
+  /*
+   * Create timestepping solver context
+   */
+  ierr = TSCreate(PETSC_COMM_WORLD,&ts);CHKERRQ(ierr);
+  ierr = TSSetProblemType(ts,TS_LINEAR);CHKERRQ(ierr);
+
+  /*
+   * Set function to get information at every timestep
+   */
+  if (_ts_monitor!=NULL){
+    TSMonitorSet(ts,_ts_monitor,NULL,NULL);
+  }
+  /*
+   * Set up ODE system
+   */
+
+   /* TSSetRHSFunct
+ion(ts,NULL,RHSFunction,NULL); */
+  TSSetRHSFunction(ts,NULL,TSComputeRHSFunctionLinear,NULL);
+  TSSetRHSJacobian(ts,full_A,full_A,TSComputeRHSJacobianConstant,NULL);
+
+  if (!forwardonly) {
+    ierr = TSSetSaveTrajectory(ts);CHKERRQ(ierr);
+  }
+
+  TSSetInitialTimeStep(ts,0.0,dt);
+  /*
+   * Set default options, can be changed at runtime
+   */
+
+  TSSetDuration(ts,steps_max,time_max);
+  TSSetExactFinalTime(ts,TS_EXACTFINALTIME_STEPOVER);
+  TSSetType(ts,TSRK);
+  TSRKSetType(ts,TSRK3BS);
+  TSSetSolution(ts,x);
+  TSSetFromOptions(ts);
+  TSSolve(ts,x);
+  TSGetTimeStepNumber(ts,&steps);
+
+  /* Pass -1.0 to flag the routine to print the final populations to stdout */
+  get_populations(x,-1.0);
+
+  PetscPrintf(PETSC_COMM_WORLD,"Steps %D\n",steps);
+
+  if (!forwardonly) {
+    Vec lambda[0];
+
+    ierr = VecDuplicate(x,&lambda[0]);CHKERRQ(ierr);
+    ierr = VecSetValue(lambda[0],0,1.0,INSERT_VALUES);CHKERRQ(ierr);
+    ierr = VecAssemblyBegin(lambda[0]);CHKERRQ(ierr);
+    ierr = VecAssemblyEnd(lambda[0]);CHKERRQ(ierr);
+    ierr = TSSetCostGradients(ts,1,lambda,NULL);CHKERRQ(ierr);
+    ierr = TSAdjointSolve(ts);CHKERRQ(ierr);
+
+    ierr = VecView(lambda[0],PETSC_VIEWER_STDOUT_WORLD);CHKERRQ(ierr);
+    ierr = VecDestroy(&lambda[0]);CHKERRQ(ierr);
+  }
+
+  /* Free work space */
+  TSDestroy(&ts);
+  destroy_dm(x);
+  /* VecDestroy(&x); */
+
+  return 0;
+}
